@@ -1,0 +1,17 @@
+# Blueprint Render untuk server mabar + web (BELUM DIUJI di Render sungguhan).
+# Cara pakai: render.com -> New -> Blueprint -> pilih repo ini -> Apply.
+# Paket Free: tidur setelah 15 menit tanpa lalu lintas masuk (pesan WebSocket dari klien dihitung), bangun +-1 menit.
+services:
+  - type: web
+    name: royal-felt
+    runtime: node
+    plan: free
+    region: singapore
+    # --include=dev: Render memasang paket produksi saja secara bawaan, padahal build web butuh vite.
+    # Bila build web gagal, sisa hasil build dibuang dan server memakai salinan siap pakai di apps/server/public.
+    buildCommand: npm install --include=dev && (npm run build || rm -rf apps/web/dist)
+    startCommand: npm run server
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"

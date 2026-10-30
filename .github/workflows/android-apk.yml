@@ -1,0 +1,204 @@
+# Membangun APK Android (debug, sudah bertanda tangan) otomatis setiap ada push ke GitHub.
+#
+# Mengambil APK:  tab Actions -> pilih run terbaru -> bagian "Artifacts" di paling bawah -> royal-felt-apk
+# Link unduh untuk teman (halaman Releases): buat tag, mis. `git tag v0.7.1 && git push origin v0.7.1`
+# Alamat server mabar yang ditanam ke APK: Settings -> Secrets and variables -> Actions -> tab Variables
+#   -> New repository variable: VITE_DEFAULT_SERVER = wss://nama-layananmu.onrender.com
+#   (atau isi saat menjalankan manual lewat Actions -> Build APK Android -> Run workflow)
+name: Build APK Android
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: 'Alamat server mabar, mis. wss://royal-felt.onrender.com (kosong = pakai variabel repo VITE_DEFAULT_SERVER)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write # hanya dipakai untuk membuat Release saat ada tag
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Bangun APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VITE_DEFAULT_SERVER: ${{ inputs.server_url || vars.VITE_DEFAULT_SERVER }}
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      - name: Pasang Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Pasang Java (JDK 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Versi alat (untuk catatan)
+        run: |
+          node -v
+          npm -v
+          java -version
+          echo "ANDROID_HOME=${ANDROID_HOME:-(tidak diatur)}"
+
+      - name: Pasang dependensi web
+        run: npm install --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps
+
+      - name: Build web (Vite)
+        run: |
+          echo "Alamat server bawaan di APK: ${VITE_DEFAULT_SERVER:-(kosong, pemain mengisi sendiri di layar Mabar Online)}"
+          npm run build -w @rfp/web
+          test -f apps/web/dist/index.html
+          ls -la apps/web/dist
+          if [ -n "${VITE_DEFAULT_SERVER:-}" ]; then
+            if grep -rlF -- "$VITE_DEFAULT_SERVER" apps/web/dist >/dev/null 2>&1; then
+              echo "Alamat server tertanam di hasil build."
+            else
+              echo "::warning::Alamat server tidak ditemukan di hasil build; periksa nama variabel VITE_DEFAULT_SERVER."
+            fi
+          fi
+
+      - name: Pasang Capacitor
+        working-directory: mobile
+        run: npm install --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps
+
+      - name: Buat proyek Android
+        working-directory: mobile
+        run: |
+          npx cap telemetry off || true
+          npx cap add android
+          ls android
+
+      - name: Sesuaikan proyek Android (landscape, ikon, getar, versi)
+        working-directory: mobile
+        env:
+          RF_VERSION_CODE: ${{ github.run_number }}
+        run: |
+          RF_VERSION_NAME="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          export RF_VERSION_NAME
+          node scripts/patch-android.mjs
+          echo "--- AndroidManifest.xml hasil penyesuaian"
+          cat android/app/src/main/AndroidManifest.xml
+
+      - name: Pakai kunci debug tetap (agar APK baru bisa menimpa APK lama)
+        run: |
+          mkdir -p "$HOME/.android"
+          if keytool -list -keystore mobile/signing/debug.keystore -storepass android -alias androiddebugkey >/dev/null 2>&1; then
+            cp mobile/signing/debug.keystore "$HOME/.android/debug.keystore"
+            if [ -n "${ANDROID_USER_HOME:-}" ]; then
+              mkdir -p "$ANDROID_USER_HOME"
+              cp mobile/signing/debug.keystore "$ANDROID_USER_HOME/debug.keystore"
+            fi
+            echo "Kunci debug tetap dipakai."
+          else
+            echo "::warning::Kunci debug tetap tidak terbaca; memakai kunci acak (APK berikutnya harus uninstall dulu sebelum dipasang)."
+          fi
+
+      - name: Terima lisensi Android SDK (bila perlu)
+        run: |
+          SDKM="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKM" ]; then
+            yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          fi
+          echo "ok"
+
+      - name: Bangun APK (Gradle)
+        id: gradle_full
+        continue-on-error: true
+        working-directory: mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --console=plain
+
+      - name: Ulangi dengan penyesuaian minimal (hanya bila langkah di atas gagal)
+        if: steps.gradle_full.outcome == 'failure'
+        working-directory: mobile
+        env:
+          RF_SAFE: '1'
+        run: |
+          echo "::warning::Build penuh gagal; mengulang dengan penyesuaian minimal (tanpa ikon/splash kustom)."
+          rm -rf android
+          npx cap add android
+          node scripts/patch-android.mjs
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --console=plain
+
+      - name: Periksa dan beri nama APK
+        id: apk
+        run: |
+          SRC=mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if [ ! -f "$SRC" ]; then echo "::error::APK tidak ditemukan di $SRC"; exit 1; fi
+          VER="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          OUT="royal-felt-v${VER}-build${{ github.run_number }}.apk"
+          cp "$SRC" "$OUT"
+          unzip -l "$OUT" > apk-isi.txt
+          if ! grep -q 'assets/public/index.html' apk-isi.txt; then
+            echo "::error::index.html tidak ada di dalam APK (hasil build web tidak ikut terbungkus)"; exit 1
+          fi
+          rm -f apk-isi.txt
+          ls -l "$OUT"
+          APKSIGNER="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$APKSIGNER" ]; then "$APKSIGNER" verify --print-certs "$OUT" 2>&1 | head -3 || true; fi
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Unggah APK (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: royal-felt-apk
+          path: ${{ steps.apk.outputs.file }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Taruh APK di halaman Releases (hanya untuk tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK: ${{ steps.apk.outputs.file }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$APK" --repo "$GITHUB_REPOSITORY" \
+            --title "Royal Felt $GITHUB_REF_NAME" \
+            --notes "APK Android (debug, bertanda tangan kunci debug tetap). Pasang dengan mengizinkan 'instal dari sumber tidak dikenal'. Bisa dipasang menimpa versi sebelumnya tanpa menghapus data." \
+            || gh release upload "$GITHUB_REF_NAME" "$APK" --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Ringkasan
+        run: |
+          {
+            echo "### APK siap"
+            echo ""
+            echo "- File: \`${{ steps.apk.outputs.file }}\`"
+            echo "- Unduh: bagian **Artifacts** di bawah halaman ini -> **royal-felt-apk** (zip berisi APK)."
+            echo "- Server mabar bawaan: \`${VITE_DEFAULT_SERVER:-(kosong)}\`"
+            echo "- Mode aman terpakai: ${{ steps.gradle_full.outcome == 'failure' && 'ya (tanpa ikon/splash kustom)' || 'tidak' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cek:
+    name: Tes dan cek tipe (informasi saja)
+    runs-on: ubuntu-latest
+    continue-on-error: true # hasil di sini tidak menggagalkan pembuatan APK
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pasang dependensi
+        run: npm install --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps
+      - name: Cek tipe TypeScript
+        run: npm run typecheck
+      - name: Tes mesin dan server
+        if: ${{ !cancelled() }}
+        run: npm test

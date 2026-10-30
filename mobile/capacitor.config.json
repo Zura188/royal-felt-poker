@@ -1,0 +1,14 @@
+{
+  "appId": "com.royalfelt.capsa",
+  "appName": "Royal Felt",
+  "webDir": "../apps/web/dist",
+  "backgroundColor": "#061711",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "SystemBars": {
+      "hidden": true
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "royal-felt-poker",
+  "private": true,
+  "version": "0.7.1",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @rfp/web",
+    "build": "npm run build -w @rfp/web",
+    "preview": "npm run preview -w @rfp/web",
+    "typecheck": "npm run typecheck -w @rfp/web && npm run typecheck -w @rfp/capsa-engine && npm run typecheck -w @rfp/server",
+    "test": "npm test -w @rfp/capsa-engine && npm test -w @rfp/server",
+    "server": "npm start -w @rfp/server"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
